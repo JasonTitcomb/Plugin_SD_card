@@ -4,9 +4,29 @@
 
 The SD card plugin adds a few `$` commands for listing files and running G-code from a SD Card:
 
+Added file line to SD: report.
+Send file from pendant to SD card on controller to be run from there.
+Line number allows display of running line.
+
 `$FM`
 
 Mount card as the root \(/\) directory.
+
+`$FU`
+
+Un-Mount
+
+`FUP`
+
+Sender:
+  $FUP=job.nc,123456\n
+  wait for "ok"
+
+Sender:
+  send exactly 123456 raw bytes
+
+Controller:
+  replies "Upload complete"
 
 `$F`
 
@@ -32,6 +52,8 @@ Dump file content to output stream.
 `$FD=<filename>`
 
 Delete file.
+
+
 
 Dependencies:
 
