@@ -679,7 +679,17 @@ static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_fla
             stream_write("|SD:");
             stream_write(pct_done);
             stream_write(",");
-            stream_write(file.name);
+            
+            if(file.line ==1)
+                stream_write(file.name);
+
+            // add line number output
+            if(file.line > 0) {
+                stream_write(",");
+                char linebuf[12];
+                sprintf(linebuf, UINT32FMT, file.line);
+                stream_write(linebuf);
+            }
         } else if(hal.stream.read == await_cycle_start)
             stream_write("|SD:Pending");
     }
