@@ -29,12 +29,12 @@
 
 #define BUFLEN 80
 
-#if defined(ESP_PLATFORM) || defined(STM32_PLATFORM) ||  defined(__LPC17XX__) ||  defined(__IMXRT1062__) || defined(__MSP432E401Y__)
+#if defined(ESP_PLATFORM) || defined(STM32_PLATFORM) || defined(__LPC17XX__) || defined(__IMXRT1062__) || defined(__MSP432E401Y__)
 #define NEW_FATFS
 #endif
 
 #include "grbl/report.h"
-//#include "grbl/protocol.h"
+// #include "grbl/protocol.h"
 #include "grbl/state_machine.h"
 #include "grbl/stream_file.h"
 #include "grbl/vfs.h"
@@ -60,10 +60,11 @@ static driver_setup_ptr driver_setup;
 static settings_changed_ptr settings_changed;
 
 // forward declarations
-static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_flags_t report);
+static void onRealtimeReport(stream_write_ptr stream_write, report_tracking_flags_t report);
 static int32_t file_upload_read(void);
 
-typedef struct {
+typedef struct
+{
     vfs_file_t *file;       // target SD file
     const char *filename;   // for reporting
     uint32_t expected_size; // total bytes expected
@@ -79,7 +80,6 @@ static stream_read_ptr stream_read_backup;
 // --- optional CRC32 helper ---
 static uint32_t crc32_update(uint32_t crc, uint8_t data);
 
-
 #ifdef __MSP432E401Y__
 /*---------------------------------------------------------*/
 /* User Provided Timer Function for FatFs module           */
@@ -88,47 +88,59 @@ static uint32_t crc32_update(uint32_t crc, uint8_t data);
 /* FatFs module. Any valid time must be returned even if   */
 /* the system does not support a real time clock.          */
 
-DWORD fatfs_getFatTime (void)
+DWORD fatfs_getFatTime(void)
 {
-    return    ((2007UL-1980) << 25)  // Year = 2007
-            | (6UL << 21)            // Month = June
-            | (5UL << 16)            // Day = 5
-            | (11U << 11)            // Hour = 11
-            | (38U << 5)             // Min = 38
-            | (0U >> 1)              // Sec = 0
-            ;
-
+    return ((2007UL - 1980) << 25) // Year = 2007
+           | (6UL << 21)           // Month = June
+           | (5UL << 16)           // Day = 5
+           | (11U << 11)           // Hour = 11
+           | (38U << 5)            // Min = 38
+           | (0U >> 1)             // Sec = 0
+        ;
 }
 #endif
+
+static uint32_t crc32_update(uint32_t crc, uint8_t data)
+{
+    crc ^= data;
+    for (int i = 0; i < 8; i++)
+        crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320UL : (crc >> 1);
+    return crc;
+}
 
 // --- progress report hook ---
 static void onUploadRealtimeReport(stream_write_ptr stream_write, report_tracking_flags_t report)
 {
-    if(!upload.active)
+    if (!upload.active)
         return;
 
     float percent = 0.0f;
-    if(upload.expected_size)
+    if (upload.expected_size)
         percent = 100.0f * upload.received / upload.expected_size;
 
+    char crcmsg[64];
+    snprintf(crcmsg, sizeof(crcmsg), "CRC32: %08lX", upload.crc);
+
     stream_write("|UP:");
-    stream_write(ftoa(percent,1));    // convert float to ASCII
+    stream_write(ftoa(percent, 1)); // convert float to ASCII
     stream_write(",");
+    stream_write(crcmsg);
+    stream_write(",FILE:");
     stream_write(upload.filename);
 
     // chain previous handlers
-    if(stream_read_backup)
-        stream_read_backup();  // optional, may depend on plugin
+    if (stream_read_backup)
+        stream_read_backup(); // optional, may depend on plugin
 }
 
-// --- called by $FU command to start upload ---
-status_code_t file_upload_start(const char *fname, uint32_t size)
+// --- called by $FUP command to start upload ---
+status_code_t file_upload(const char *fname, uint32_t size)
 {
-    if(upload.active)
+    if (upload.active)
         return Status_InvalidStatement; // already uploading
 
     upload.file = vfs_open(fname, "w");
-    if(!upload.file)
+    if (!upload.file)
         return Status_FileOpenFailed;
 
     upload.filename = fname;
@@ -150,18 +162,19 @@ status_code_t file_upload_start(const char *fname, uint32_t size)
 // --- called by hal.stream.read during upload ---
 static int32_t file_upload_read(void)
 {
-    if(!upload.active)
+    if (!upload.active)
         return -1;
 
     int16_t c = stream_read_backup();
-    if(c < 0)
+    if (c < 0)
         return -1; // nothing available
 
     uint8_t b = (uint8_t)c;
 
     // write to SD via VFS
     size_t written = vfs_write(&b, 1, 1, upload.file);
-    if(written != 1) {
+    if (written != 1)
+    {
         // handle SD write error: abort upload
         vfs_close(upload.file);
         upload.active = false;
@@ -171,78 +184,97 @@ static int32_t file_upload_read(void)
     }
 
     upload.received++;
-    //upload.crc = crc32_update(upload.crc, b);
+
+    upload.crc = crc32_update(upload.crc, b);
 
     // report progress
-    // optionally call your onUploadRealtimeReport hook here
-    onUploadRealtimeReport(hal.stream.write, (report_tracking_flags_t){ .all = true });
+    onUploadRealtimeReport(hal.stream.write, (report_tracking_flags_t){.all = true});
 
     // finish condition
-    if(upload.received >= upload.expected_size) {
+    if (upload.received >= upload.expected_size)
+    {
         vfs_close(upload.file);
         upload.active = false;
         hal.stream.read = stream_read_backup;
+
         report_message("Upload complete", Message_Info);
     }
 
     return -1; // do not feed parser
 }
 
+// expects command arguments: "<filename> <size>"
+static status_code_t file_upload_start(sys_state_t state, char *args)
+{
+    // parse the file name and size from args
+    char filename[64];
+    uint32_t size = 0;
+    if (sscanf(args, "%63s %lu", filename, &size) != 2)
+    {
+        return Status_InvalidStatement;
+    }
+    return file_upload(filename, size);
+}
 
-
-static bool sdcard_mount (void)
+static bool sdcard_mount(void)
 {
     static FATFS *fs = NULL;
 
     bool is_mounted = !!fatfs;
 
-    if(sdcard.on_mount) {
+    if (sdcard.on_mount)
+    {
 
         char *mdev = sdcard.on_mount(&fatfs);
 
-        if(fatfs != NULL) {
+        if (fatfs != NULL)
+        {
 #ifdef NEW_FATFS
-            if(mdev)
+            if (mdev)
                 strcpy(dev, mdev);
 #endif
         }
-    } else {
+    }
+    else
+    {
 
-        if(fs == NULL)
+        if (fs == NULL)
             fs = malloc(sizeof(FATFS));
 
 #ifdef NEW_FATFS
-        if(fs && (f_mount(fs, dev, 1) == FR_OK))
+        if (fs && (f_mount(fs, dev, 1) == FR_OK))
 #else
-        if(fs && (f_mount(0, fs) == FR_OK))
+        if (fs && (f_mount(0, fs) == FR_OK))
 #endif
             fatfs = fs;
         else
             fatfs = NULL;
     }
 
-    if((mount_changed = is_mounted != !!fatfs) && !realtime_report_subscribed) {
+    if ((mount_changed = is_mounted != !!fatfs) && !realtime_report_subscribed)
+    {
         realtime_report_subscribed = true;
         on_realtime_report = grbl.on_realtime_report;
         grbl.on_realtime_report = onRealtimeReport; // Add mount status changes and job percent complete to real time report
     }
 
-    if(fatfs != NULL)
+    if (fatfs != NULL)
         fs_fatfs_mount("/");
 
     return fatfs != NULL;
 }
 
-static void sdcard_auto_mount (void *data)
+static void sdcard_auto_mount(void *data)
 {
-    if(fatfs == NULL && !sdcard_mount())
+    if (fatfs == NULL && !sdcard_mount())
         report_message("SD card automount failed", Message_Info);
 }
 
-static bool sdcard_unmount (void)
+static bool sdcard_unmount(void)
 {
-    if(fatfs) {
-        if(sdcard.on_unmount)
+    if (fatfs)
+    {
+        if (sdcard.on_unmount)
             mount_changed = sdcard.on_unmount(&fatfs);
 #ifdef NEW_FATFS
         else
@@ -251,7 +283,8 @@ static bool sdcard_unmount (void)
         else
             mount_changed = f_mount(0, NULL) == FR_OK;
 #endif
-        if(mount_changed && fatfs) {
+        if (mount_changed && fatfs)
+        {
             fatfs = NULL;
             vfs_unmount("/");
         }
@@ -260,38 +293,41 @@ static bool sdcard_unmount (void)
     return fatfs == NULL;
 }
 
-static status_code_t sd_cmd_mount (sys_state_t state, char *args)
+static status_code_t sd_cmd_mount(sys_state_t state, char *args)
 {
     return sdcard_mount() ? Status_OK : Status_SDMountError;
 }
 
-static status_code_t sd_cmd_unmount (sys_state_t state, char *args)
+static status_code_t sd_cmd_unmount(sys_state_t state, char *args)
 {
     return fatfs ? (sdcard_unmount() ? Status_OK : Status_SDMountError) : Status_SDNotMounted;
 }
 
 #if FF_FS_READONLY == 0 && FF_USE_MKFS == 1
 
-static status_code_t sd_cmd_format (sys_state_t state, char *args)
+static status_code_t sd_cmd_format(sys_state_t state, char *args)
 {
     status_code_t status = Status_InvalidStatement;
 
-    if(fatfs) {
+    if (fatfs)
+    {
 
         vfs_drive_t *drive = vfs_get_drive("/");
 
-        if(drive->fs && !strcmp(args, "yes")) {
+        if (drive->fs && !strcmp(args, "yes"))
+        {
 
             report_message("Formatting SD card...", Message_Info);
 
-            if(vfs_drive_format(drive) == 0)
+            if (vfs_drive_format(drive) == 0)
                 status = !sdcard_mount() ? Status_SDMountError : Status_OK;
             else
                 status = Status_FsFormatFailed;
 
             report_message("", Message_Plain);
         }
-    } else
+    }
+    else
         status = Status_SDNotMounted;
 
     return status;
@@ -299,11 +335,11 @@ static status_code_t sd_cmd_format (sys_state_t state, char *args)
 
 #endif
 
-static void sd_detect (void *mount)
+static void sd_detect(void *mount)
 {
-    if((uint32_t)mount == 0)
+    if ((uint32_t)mount == 0)
         sdcard_unmount();
-    else if(fatfs == NULL)
+    else if (fatfs == NULL)
         sdcard_mount();
 }
 
@@ -312,40 +348,43 @@ ISR_CODE void ISR_FUNC(sdcard_detect)(bool mount)
     task_add_immediate(sd_detect, (void *)mount);
 }
 
-static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_flags_t report)
+static void onRealtimeReport(stream_write_ptr stream_write, report_tracking_flags_t report)
 {
-    if(report.all || mount_changed) {
+    if (report.all || mount_changed)
+    {
         stream_write("|SD:");
         stream_write(uitoa((sd_detectable ? 2 : 0) + !!fatfs));
         mount_changed = false;
     }
 
-    if(on_realtime_report)
+    if (on_realtime_report)
         on_realtime_report(stream_write, report);
 }
 
-static void sd_detect_pin (xbar_t *pin, void *data)
+static void sd_detect_pin(xbar_t *pin, void *data)
 {
-    if(pin->id == Input_SdCardDetect) {
+    if (pin->id == Input_SdCardDetect)
+    {
         sd_detectable = true;
-        if(pin->get_value)
+        if (pin->get_value)
             detect_pin = pin;
     }
 }
 
-static void onSettingsChanged (settings_t *settings, settings_changed_flags_t changed)
+static void onSettingsChanged(settings_t *settings, settings_changed_flags_t changed)
 {
     static bool mount_attempted = false; // in case some other code hooked into hal.settings_changed
 
     settings_changed(settings, changed);
 
-    if(!mount_attempted) {
+    if (!mount_attempted)
+    {
         mount_attempted = true;
         sdcard_mount();
     }
 }
 
-static bool onDriverSetup (settings_t *settings)
+static bool onDriverSetup(settings_t *settings)
 {
     bool ok;
 
@@ -354,55 +393,54 @@ static bool onDriverSetup (settings_t *settings)
 
     ok = driver_setup(settings);
 
-    if(hal.settings_changed == onSettingsChanged)
+    if (hal.settings_changed == onSettingsChanged)
         hal.settings_changed = settings_changed;
 
     return ok;
 }
 
 // Attempt early mount before other clients access a shared SPI bus.
-void sdcard_early_mount (void)
+void sdcard_early_mount(void)
 {
-    if(detect_pin == NULL || detect_pin->get_value(detect_pin) == 0.0f) {
+    if (detect_pin == NULL || detect_pin->get_value(detect_pin) == 0.0f)
+    {
         driver_setup = hal.driver_setup;
         hal.driver_setup = onDriverSetup;
     }
 }
 
-static void onReportOptions (bool newopt)
+static void onReportOptions(bool newopt)
 {
     on_report_options(newopt);
 
-    if(newopt)
+    if (newopt)
         hal.stream.write(",SD");
     else
-        report_plugin("SDCARD", "1.26");
+        report_plugin("SDCARD", "1.27");
 }
 
-sdcard_events_t *sdcard_init (void)
+sdcard_events_t *sdcard_init(void)
 {
     PROGMEM static const sys_command_t sdcard_command_list[] = {
-        {"FM", sd_cmd_mount, { .noargs = On }, { .str = "mount SD card" } },
-        {"FU", sd_cmd_unmount, { .noargs = On }, { .str = "unmount SD card" } },
+        {"FM", sd_cmd_mount, {.noargs = On}, {.str = "mount SD card"}},
+        {"FU", sd_cmd_unmount, {.noargs = On}, {.str = "unmount SD card"}},
+        {"FUP", file_upload_start, {.noargs = On}, {.str = "upload to SD card"}},
 #if FF_FS_READONLY == 0 && FF_USE_MKFS == 1
-        {"FF", sd_cmd_format, {}, { .str = "$FF=yes - format SD card" } },
+        {"FF", sd_cmd_format, {}, {.str = "$FF=yes - format SD card"}},
 #endif
     };
 
     static sys_commands_t sdcard_commands = {
         .n_commands = sizeof(sdcard_command_list) / sizeof(sys_command_t),
-        .commands = sdcard_command_list
-    };
+        .commands = sdcard_command_list};
 
     PROGMEM static const status_detail_t status_detail[] = {
-        { Status_SDMountError, "SD Card mount failed." },
-        { Status_SDNotMounted, "SD Card not mounted." }
-    };
+        {Status_SDMountError, "SD Card mount failed."},
+        {Status_SDNotMounted, "SD Card not mounted."}};
 
     static error_details_t error_details = {
         .errors = status_detail,
-        .n_errors = sizeof(status_detail) / sizeof(status_detail_t)
-    };
+        .n_errors = sizeof(status_detail) / sizeof(status_detail_t)};
 
     hal.driver_cap.sd_card = On;
 
@@ -414,22 +452,18 @@ sdcard_events_t *sdcard_init (void)
     errors_register(&error_details);
     system_register_commands(&sdcard_commands);
 
-    if(settings.fs_options.sd_mount_on_boot)
+    if (settings.fs_options.sd_mount_on_boot)
         task_run_on_startup(sdcard_auto_mount, NULL);
 
     return &sdcard;
 }
 
-FATFS *sdcard_getfs (void)
+FATFS *sdcard_getfs(void)
 {
-    if(fatfs == NULL)
+    if (fatfs == NULL)
         sdcard_mount();
 
     return fatfs;
 }
-
-
-
-
 
 #endif // FS_ENABLE & FS_SDCARD
