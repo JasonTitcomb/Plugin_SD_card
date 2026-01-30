@@ -61,6 +61,21 @@ static settings_changed_ptr settings_changed;
 
 static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_flags_t report);
 
+typedef struct {
+    vfs_file_t *file;       // target SD file
+    const char *filename;   // for reporting
+    uint32_t expected_size; // total bytes expected
+    uint32_t received;      // bytes received so far
+    uint32_t crc;           // optional CRC32
+    bool active;
+} upload_t;
+
+// backup of original stream reader
+static int16_t (*stream_read_backup)(void);
+// --- optional CRC32 helper ---
+static uint32_t crc32_update(uint32_t crc, uint8_t data);
+static upload_t upload;
+
 #ifdef __MSP432E401Y__
 /*---------------------------------------------------------*/
 /* User Provided Timer Function for FatFs module           */
@@ -152,6 +167,105 @@ static bool sdcard_unmount (void)
     return fatfs == NULL;
 }
 
+
+// --- progress report hook ---
+static void onUploadRealtimeReport(stream_write_ptr stream_write, report_tracking_flags_t report)
+{
+    if(!upload.active)
+        return;
+
+    float percent = 0.0f;
+    if(upload.expected_size)
+        percent = 100.0f * upload.received / upload.expected_size;
+
+    stream_write("|UP:");
+    stream_write(ftoa(percent,3));    // convert float to ASCII
+    stream_write(",");
+    stream_write(upload.filename);
+
+    // chain previous handlers
+    if(stream_read_backup)
+        stream_read_backup();
+}
+
+
+static uint32_t crc32_update(uint32_t crc, uint8_t data)
+{
+    crc ^= data;
+    for(int i = 0; i < 8; i++)
+        crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320UL : (crc >> 1);
+    return crc;
+}
+
+
+
+// --- called by hal.stream.read during upload ---
+static int16_t file_upload_read(void)
+{
+    if(!upload.active)
+        return -1;
+
+    int16_t c = stream_read_backup();
+    if(c < 0)
+        return -1; // nothing available
+
+    uint8_t b = (uint8_t)c;
+
+    // write to SD via VFS
+    size_t written = vfs_write(&b, 1, 1, upload.file);
+    if(written != 1) {
+        // handle SD write error: abort upload
+        vfs_close(upload.file);
+        upload.active = false;
+        hal.stream.read = stream_read_backup;
+        report_message("Upload failed: SD write error", Message_Info);
+        return -1;
+    }
+
+    upload.received++;
+    //upload.crc = crc32_update(upload.crc, b);
+
+    // report progress
+    onUploadRealtimeReport(hal.stream.write, (report_tracking_flags_t){ .all = true });
+
+    // finish condition
+    if(upload.received >= upload.expected_size) {
+        vfs_close(upload.file);
+        upload.active = false;
+        hal.stream.read = stream_read_backup;
+        report_message("Upload complete", Message_Info);
+    }
+
+    return -1; // do not feed parser
+}
+
+// --- called by $FP command to start upload ---
+static status_code_t file_upload_start(const char *fname, uint32_t size)
+{
+    if(upload.active)
+        return Status_InvalidStatement; // already uploading
+
+    upload.file = vfs_open(fname, "w");
+    if(!upload.file)
+        return Status_FileOpenFailed;
+
+    upload.filename = fname;
+    upload.expected_size = size;
+    upload.received = 0;
+    upload.crc = 0;
+    upload.active = true;
+
+    // override stream reader
+    stream_read_backup = hal.stream.read;
+    hal.stream.read = file_upload_read;
+
+    // register status hook
+    grbl.on_realtime_report = onUploadRealtimeReport;
+
+    return Status_OK;
+}
+
+
 static status_code_t sd_cmd_mount (sys_state_t state, char *args)
 {
     return sdcard_mount() ? Status_OK : Status_SDMountError;
@@ -160,6 +274,16 @@ static status_code_t sd_cmd_mount (sys_state_t state, char *args)
 static status_code_t sd_cmd_unmount (sys_state_t state, char *args)
 {
     return fatfs ? (sdcard_unmount() ? Status_OK : Status_SDMountError) : Status_SDNotMounted;
+}
+static status_code_t file_upload (sys_state_t state, char *args)
+{
+    char filename[64];
+    uint32_t size;
+
+    if(sscanf(args, "%63s %u", filename, &size) != 2)
+        return Status_InvalidStatement;
+
+    return file_upload_start(filename, size);
 }
 
 #if FF_FS_READONLY == 0 && FF_USE_MKFS == 1
@@ -276,6 +400,7 @@ sdcard_events_t *sdcard_init (void)
     PROGMEM static const sys_command_t sdcard_command_list[] = {
         {"FM", sd_cmd_mount, { .noargs = On }, { .str = "mount SD card" } },
         {"FU", sd_cmd_unmount, { .noargs = On }, { .str = "unmount SD card" } },
+        {"FUP", file_upload, { .noargs = On }, { .str = "start upload to SD card" } },
 #if FF_FS_READONLY == 0 && FF_USE_MKFS == 1
         {"FF", sd_cmd_format, {}, { .str = "$FF=yes - format SD card" } },
 #endif

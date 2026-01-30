@@ -670,16 +670,17 @@ static void onRealtimeReport (stream_write_ptr stream_write, report_tracking_fla
 {
     if(!report.all) {
         if(hal.stream.read == read_redirected) {
-
             char *pct_done = ftoa((float)file.pos / (float)file.size * 100.0f, 1);
-
             if(state_get() != STATE_IDLE && !strncmp(pct_done, "100.0", 5))
                 strcpy(pct_done, "99.9");
-
+            char line_buf[16];
+            snprintf(line_buf, sizeof(line_buf), "%lu", (unsigned long)file.line);
             stream_write("|SD:");
             stream_write(pct_done);
             stream_write(",");
             stream_write(file.name);
+            stream_write(",");
+            stream_write(line_buf);
         } else if(hal.stream.read == await_cycle_start)
             stream_write("|SD:Pending");
     }
