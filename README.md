@@ -16,7 +16,7 @@ Mount card as the root \(/\) directory.
 
 Un-Mount
 
-`FUP`
+`$FUP=<filename>,<size>`
 
 Sender:
   $FUP=job.nc,123456\n

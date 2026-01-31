@@ -108,30 +108,33 @@ static uint32_t crc32_update(uint32_t crc, uint8_t data)
     return crc;
 }
 
-// --- progress report hook ---
-static void onUploadRealtimeReport(stream_write_ptr stream_write, report_tracking_flags_t report)
+static on_realtime_report_ptr prev_report = NULL;
+static void onUploadRealtimeReport(stream_write_ptr sw, report_tracking_flags_t report)
 {
-    if (!upload.active)
+    if (prev_report)
+        prev_report(sw, report);
+
+    if (!report.all || !upload.active)
         return;
 
     float percent = 0.0f;
     if (upload.expected_size)
         percent = 100.0f * upload.received / upload.expected_size;
 
-    char crcmsg[64];
-    snprintf(crcmsg, sizeof(crcmsg), "CRC32: %08lX", upload.crc);
+    char pct[8];
+    strcpy(pct, ftoa(percent, 1));
 
-    stream_write("|UP:");
-    stream_write(ftoa(percent, 1)); // convert float to ASCII
-    stream_write(",");
-    stream_write(crcmsg);
-    stream_write(",FILE:");
-    stream_write(upload.filename);
+    char crcmsg[16];
+    snprintf(crcmsg, sizeof(crcmsg), "%08lX", upload.crc);
 
-    // chain previous handlers
-    if (stream_read_backup)
-        stream_read_backup(); // optional, may depend on plugin
+    sw("|UP:");
+    sw(pct);
+    sw(",CRC32:");
+    sw(crcmsg);
+    sw(",FILE:");
+    sw(upload.filename);
 }
+
 
 // --- called by $FUP command to start upload ---
 status_code_t file_upload(const char *fname, uint32_t size)
@@ -155,7 +158,6 @@ status_code_t file_upload(const char *fname, uint32_t size)
 
     // register status hook
     grbl.on_realtime_report = onUploadRealtimeReport;
-
     return Status_OK;
 }
 
@@ -187,8 +189,6 @@ static int32_t file_upload_read(void)
 
     upload.crc = crc32_update(upload.crc, b);
 
-    // report progress
-    onUploadRealtimeReport(hal.stream.write, (report_tracking_flags_t){.all = true});
 
     // finish condition
     if (upload.received >= upload.expected_size)
@@ -204,16 +204,33 @@ static int32_t file_upload_read(void)
 }
 
 // expects command arguments: "<filename> <size>"
-static status_code_t file_upload_start(sys_state_t state, char *args)
+static status_code_t sd_command_upload_start(sys_state_t state, char *args)
 {
     // parse the file name and size from args
-    char filename[64];
-    uint32_t size = 0;
-    if (sscanf(args, "%63s %lu", filename, &size) != 2)
+    char *filename = NULL;
+    char *size = NULL;
+
+    // Skip the '=' if present
+    char *start = args[0] == '=' ? args + 1 : args;
+
+    // Split by comma
+    filename = strtok(start, ",");
+    size = strtok(NULL, ",");
+
+    // filename now points to "job.nc"
+    // size now points to "123456"
+
+    // Check for exactly two arguments
+    if (filename && size && strtok(NULL, ",") == NULL)
     {
+        // Valid: two arguments
+        return file_upload(filename, atoi(size));
+    }
+    else
+    {
+        // Invalid: wrong number of arguments
         return Status_InvalidStatement;
     }
-    return file_upload(filename, size);
 }
 
 static bool sdcard_mount(void)
@@ -424,7 +441,7 @@ sdcard_events_t *sdcard_init(void)
     PROGMEM static const sys_command_t sdcard_command_list[] = {
         {"FM", sd_cmd_mount, {.noargs = On}, {.str = "mount SD card"}},
         {"FU", sd_cmd_unmount, {.noargs = On}, {.str = "unmount SD card"}},
-        {"FUP", file_upload_start, {.noargs = On}, {.str = "upload to SD card"}},
+        {"FUP", sd_command_upload_start, {}, {.str = "upload to SD card"}},
 #if FF_FS_READONLY == 0 && FF_USE_MKFS == 1
         {"FF", sd_cmd_format, {}, {.str = "$FF=yes - format SD card"}},
 #endif
