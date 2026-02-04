@@ -33,12 +33,14 @@
 #define NEW_FATFS
 #endif
 
+
 #include "grbl/report.h"
 // #include "grbl/protocol.h"
 #include "grbl/state_machine.h"
 #include "grbl/stream_file.h"
 #include "grbl/vfs.h"
 #include "grbl/task.h"
+#include "grbl/system.h" // for sys.abort
 
 #include "fs_fatfs.h"
 
@@ -164,8 +166,20 @@ status_code_t file_upload(const char *fname, uint32_t size)
 // --- called by hal.stream.read during upload ---
 static int32_t file_upload_read(void)
 {
+
     if (!upload.active)
         return -1;
+
+    // Abort upload if system abort or cancel is set
+    if (sys.abort || sys.cancel) {
+        if (upload.file)
+            vfs_close(upload.file);
+            
+        upload.active = false;
+        hal.stream.read = stream_read_backup;
+        report_message("Upload aborted by user", Message_Warning);
+        return -1;
+    }
 
     int16_t c = stream_read_backup();
     if (c < 0)
@@ -196,7 +210,9 @@ static int32_t file_upload_read(void)
         vfs_close(upload.file);
         upload.active = false;
         hal.stream.read = stream_read_backup;
-
+         char uploadmsg[64];
+        snprintf(uploadmsg, sizeof(uploadmsg), "File: %s, Bytes: %lu, CRC32: %08lX", upload.filename, upload.received, upload.crc);
+        report_message(uploadmsg, Message_Info);    
         report_message("Upload complete", Message_Info);
     }
 
